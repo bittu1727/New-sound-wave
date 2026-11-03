@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">SoundWave</string>
+    <string name="search_music_hint">Search songs, artists, albums, or paste URL…</string>
+    <string name="music_service_channel_name">SoundWave Music Playback</string>
+    <string name="music_service_channel_desc">Shows ongoing music playback controls in background</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_search">Search</string>
+    <string name="nav_radio">Radio</string>
+    <string name="nav_library">Library</string>
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="previous">Previous</string>
+    <string name="next">Next</string>
+    <string name="now_playing">Now Playing</string>
+    <string name="trending">Trending Today</string>
+    <string name="favorites">Favorites</string>
+    <string name="playlists">Playlists</string>
+    <string name="recently_played">Recently Played</string>
+    <string name="custom_url_stream">Stream Custom Audio URL</string>
+    <string name="search_google">Search with Google</string>
+</resources>

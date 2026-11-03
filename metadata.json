@@ -1,0 +1,6 @@
+{
+  "name": "SoundWave",
+  "description": "Online music player to search songs, stream background music, and explore curated stations and web tracks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
