@@ -206,7 +206,7 @@ fun LibraryScreen(
                             track = pTrack,
                             isCurrentTrack = isCurrent,
                             isPlaying = playbackState.isPlaying,
-                            onClick = { viewModel.playTrack(pTrack, selectedPlaylistTracks) },
+                            onClick = { viewModel.playOrToggleTrack(pTrack, selectedPlaylistTracks) },
                             isFavorite = isFav,
                             onFavoriteToggle = { viewModel.toggleFavorite(pTrack) },
                             modifier = Modifier.padding(vertical = 2.dp)
@@ -305,7 +305,7 @@ fun LibraryScreen(
                                     track = fTrack,
                                     isCurrentTrack = isCurrent,
                                     isPlaying = playbackState.isPlaying,
-                                    onClick = { viewModel.playTrack(fTrack, favorites) },
+                                    onClick = { viewModel.playOrToggleTrack(fTrack, favorites) },
                                     isFavorite = true,
                                     onFavoriteToggle = { viewModel.toggleFavorite(fTrack) },
                                     modifier = Modifier.padding(vertical = 2.dp)
@@ -451,7 +451,7 @@ fun LibraryScreen(
                                     track = hTrack,
                                     isCurrentTrack = isCurrent,
                                     isPlaying = playbackState.isPlaying,
-                                    onClick = { viewModel.playTrack(hTrack, recentlyPlayed) },
+                                    onClick = { viewModel.playOrToggleTrack(hTrack, recentlyPlayed) },
                                     isFavorite = isFav,
                                     onFavoriteToggle = { viewModel.toggleFavorite(hTrack) },
                                     modifier = Modifier.padding(vertical = 2.dp)

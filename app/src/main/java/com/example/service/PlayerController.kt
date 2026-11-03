@@ -40,6 +40,7 @@ object PlayerController {
                 currentTrack = track,
                 queue = if (newQueue.isNotEmpty()) newQueue else listOf(track),
                 queueIndex = index,
+                isPlaying = false,
                 isLoading = true,
                 errorMessage = null,
                 currentPositionMs = 0L,
@@ -59,6 +60,7 @@ object PlayerController {
                 it.copy(
                     currentTrack = track,
                     queueIndex = index,
+                    isPlaying = false,
                     isLoading = true,
                     errorMessage = null,
                     currentPositionMs = 0L,
@@ -71,7 +73,11 @@ object PlayerController {
     }
 
     fun togglePlayPause() {
-        if (_playbackState.value.isPlaying) {
+        val state = _playbackState.value
+        if (state.currentTrack == null) return
+
+        // If currently playing OR currently buffering/loading, pausing is the expected user action
+        if (state.isPlaying || state.isLoading) {
             pause()
         } else {
             resume()
@@ -79,11 +85,13 @@ object PlayerController {
     }
 
     fun pause() {
+        _playbackState.update { it.copy(isPlaying = false, isLoading = false) }
         sendServiceCommand(MusicPlaybackService.ACTION_PAUSE)
     }
 
     fun resume() {
         if (_playbackState.value.currentTrack != null) {
+            _playbackState.update { it.copy(isLoading = true, errorMessage = null) }
             sendServiceCommand(MusicPlaybackService.ACTION_RESUME)
         }
     }

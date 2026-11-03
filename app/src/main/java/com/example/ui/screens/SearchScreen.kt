@@ -317,7 +317,7 @@ fun SearchScreen(
                             track = track,
                             isCurrentTrack = isCurrent,
                             isPlaying = playbackState.isPlaying,
-                            onClick = { viewModel.playTrack(track, searchResults) },
+                            onClick = { viewModel.playOrToggleTrack(track, searchResults) },
                             isFavorite = isFav,
                             onFavoriteToggle = { viewModel.toggleFavorite(track) },
                             modifier = Modifier.padding(vertical = 2.dp)

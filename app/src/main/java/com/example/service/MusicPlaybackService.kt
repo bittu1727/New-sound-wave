@@ -52,6 +52,7 @@ class MusicPlaybackService : Service() {
 
     private var currentPlayingTrack: Track? = null
     private var isPrepared = false
+    private var playWhenReady = true
     private var currentAlbumArtBitmap: Bitmap? = null
     private var currentArtUrl: String? = null
 
@@ -62,6 +63,7 @@ class MusicPlaybackService : Service() {
         const val ACTION_PLAY = "com.example.ACTION_PLAY"
         const val ACTION_PAUSE = "com.example.ACTION_PAUSE"
         const val ACTION_RESUME = "com.example.ACTION_RESUME"
+        const val ACTION_TOGGLE_PLAY_PAUSE = "com.example.ACTION_TOGGLE_PLAY_PAUSE"
         const val ACTION_NEXT = "com.example.ACTION_NEXT"
         const val ACTION_PREV = "com.example.ACTION_PREV"
         const val ACTION_STOP = "com.example.ACTION_STOP"
@@ -138,6 +140,9 @@ class MusicPlaybackService : Service() {
                     startTrackPlayback(track)
                 }
             }
+            ACTION_TOGGLE_PLAY_PAUSE -> {
+                togglePlayPause()
+            }
             ACTION_PAUSE -> {
                 pausePlayback()
             }
@@ -166,9 +171,24 @@ class MusicPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun togglePlayPause() {
+        val isCurrentlyPlaying = try {
+            mediaPlayer?.isPlaying == true
+        } catch (e: Exception) {
+            false
+        }
+
+        if (isCurrentlyPlaying || (!isPrepared && playWhenReady)) {
+            pausePlayback()
+        } else {
+            resumePlayback()
+        }
+    }
+
     private fun startTrackPlayback(track: Track) {
         currentPlayingTrack = track
         isPrepared = false
+        playWhenReady = true
         stopProgressUpdates()
 
         PlayerController.updateState(
@@ -201,17 +221,39 @@ class MusicPlaybackService : Service() {
                 setOnPreparedListener { mp ->
                     isPrepared = true
                     val duration = if (track.isLiveStream) 0L else mp.duration.toLong()
-                    mp.start()
                     applyPlaybackSpeed(PlayerController.playbackState.value.speed)
 
-                    PlayerController.updateState(
-                        isPlaying = true,
-                        isLoading = false,
-                        currentPosMs = 0L,
-                        durationMs = if (duration > 0) duration else track.durationMs
-                    )
-                    showForegroundNotification(track, isPlaying = true)
-                    startProgressUpdates()
+                    if (playWhenReady) {
+                        try {
+                            mp.start()
+                            PlayerController.updateState(
+                                isPlaying = true,
+                                isLoading = false,
+                                currentPosMs = 0L,
+                                durationMs = if (duration > 0) duration else track.durationMs
+                            )
+                            showForegroundNotification(track, isPlaying = true)
+                            startProgressUpdates()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            PlayerController.updateState(
+                                isPlaying = false,
+                                isLoading = false,
+                                currentPosMs = 0L,
+                                durationMs = 0L,
+                                errorMessage = "Failed to start playback"
+                            )
+                        }
+                    } else {
+                        // User paused while the media was buffering/preparing
+                        PlayerController.updateState(
+                            isPlaying = false,
+                            isLoading = false,
+                            currentPosMs = 0L,
+                            durationMs = if (duration > 0) duration else track.durationMs
+                        )
+                        showForegroundNotification(track, isPlaying = false)
+                    }
                 }
 
                 setOnCompletionListener {
@@ -253,12 +295,28 @@ class MusicPlaybackService : Service() {
     }
 
     private fun pausePlayback() {
-        if (mediaPlayer?.isPlaying == true) {
-            mediaPlayer?.pause()
+        playWhenReady = false
+        if (mediaPlayer != null && isPrepared) {
+            try {
+                if (mediaPlayer?.isPlaying == true) {
+                    mediaPlayer?.pause()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         stopProgressUpdates()
-        val currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L
-        val duration = mediaPlayer?.duration?.toLong() ?: (currentPlayingTrack?.durationMs ?: 0L)
+
+        val currentPos = if (isPrepared) {
+            try { mediaPlayer?.currentPosition?.toLong() ?: 0L } catch (e: Exception) { 0L }
+        } else {
+            PlayerController.playbackState.value.currentPositionMs
+        }
+        val duration = if (isPrepared) {
+            try { mediaPlayer?.duration?.toLong() ?: (currentPlayingTrack?.durationMs ?: 0L) } catch (e: Exception) { currentPlayingTrack?.durationMs ?: 0L }
+        } else {
+            currentPlayingTrack?.durationMs ?: 0L
+        }
 
         PlayerController.updateState(
             isPlaying = false,
@@ -273,40 +331,71 @@ class MusicPlaybackService : Service() {
     }
 
     private fun resumePlayback() {
-        if (requestAudioFocus()) {
-            mediaPlayer?.start()
-            val currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L
-            val duration = mediaPlayer?.duration?.toLong() ?: (currentPlayingTrack?.durationMs ?: 0L)
+        playWhenReady = true
+        val track = currentPlayingTrack ?: PlayerController.playbackState.value.currentTrack
+        if (track == null) return
 
+        // If mediaPlayer was nullified or destroyed, start it fresh
+        if (mediaPlayer == null) {
+            startTrackPlayback(track)
+            return
+        }
+
+        // If still preparing, keep state as loading and let onPreparedListener start it
+        if (!isPrepared) {
             PlayerController.updateState(
-                isPlaying = true,
-                isLoading = false,
-                currentPosMs = currentPos,
-                durationMs = duration
+                isPlaying = false,
+                isLoading = true,
+                currentPosMs = PlayerController.playbackState.value.currentPositionMs,
+                durationMs = track.durationMs
             )
+            showForegroundNotification(track, isPlaying = false)
+            return
+        }
 
-            currentPlayingTrack?.let {
-                showForegroundNotification(it, isPlaying = true)
+        if (requestAudioFocus()) {
+            try {
+                mediaPlayer?.start()
+                val currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L
+                val duration = if (track.isLiveStream) 0L else mediaPlayer?.duration?.toLong() ?: track.durationMs
+
+                PlayerController.updateState(
+                    isPlaying = true,
+                    isLoading = false,
+                    currentPosMs = currentPos,
+                    durationMs = duration
+                )
+
+                showForegroundNotification(track, isPlaying = true)
+                startProgressUpdates()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // Recovery: re-prepare track
+                startTrackPlayback(track)
             }
-            startProgressUpdates()
         }
     }
 
     private fun performSeek(positionMs: Long) {
         if (mediaPlayer != null && isPrepared && currentPlayingTrack?.isLiveStream != true) {
-            mediaPlayer?.seekTo(positionMs.toInt())
-            PlayerController.updateState(
-                isPlaying = mediaPlayer?.isPlaying == true,
-                isLoading = false,
-                currentPosMs = positionMs,
-                durationMs = mediaPlayer?.duration?.toLong() ?: 0L
-            )
-            updateMediaSessionState(
-                isPlaying = mediaPlayer?.isPlaying == true,
-                currentPos = positionMs,
-                track = currentPlayingTrack,
-                albumArt = currentAlbumArtBitmap
-            )
+            try {
+                mediaPlayer?.seekTo(positionMs.toInt())
+                val isPlayingNow = try { mediaPlayer?.isPlaying == true } catch (e: Exception) { false }
+                PlayerController.updateState(
+                    isPlaying = isPlayingNow,
+                    isLoading = false,
+                    currentPosMs = positionMs,
+                    durationMs = mediaPlayer?.duration?.toLong() ?: 0L
+                )
+                updateMediaSessionState(
+                    isPlaying = isPlayingNow,
+                    currentPos = positionMs,
+                    track = currentPlayingTrack,
+                    albumArt = currentAlbumArtBitmap
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -323,6 +412,7 @@ class MusicPlaybackService : Service() {
     }
 
     private fun stopPlayback() {
+        playWhenReady = false
         stopProgressUpdates()
         releaseMediaPlayer()
         releaseLocks()
@@ -366,21 +456,27 @@ class MusicPlaybackService : Service() {
         progressJob = serviceScope.launch {
             while (isActive) {
                 delay(1000L)
-                if (mediaPlayer?.isPlaying == true) {
-                    val pos = mediaPlayer?.currentPosition?.toLong() ?: 0L
-                    val dur = if (currentPlayingTrack?.isLiveStream == true) 0L else mediaPlayer?.duration?.toLong() ?: 0L
-                    PlayerController.updateState(
-                        isPlaying = true,
-                        isLoading = false,
-                        currentPosMs = pos,
-                        durationMs = dur
-                    )
-                    updateMediaSessionState(
-                        isPlaying = true,
-                        currentPos = pos,
-                        track = currentPlayingTrack,
-                        albumArt = currentAlbumArtBitmap
-                    )
+                if (mediaPlayer != null && isPrepared) {
+                    try {
+                        if (mediaPlayer?.isPlaying == true) {
+                            val pos = mediaPlayer?.currentPosition?.toLong() ?: 0L
+                            val dur = if (currentPlayingTrack?.isLiveStream == true) 0L else mediaPlayer?.duration?.toLong() ?: 0L
+                            PlayerController.updateState(
+                                isPlaying = true,
+                                isLoading = false,
+                                currentPosMs = pos,
+                                durationMs = dur
+                            )
+                            updateMediaSessionState(
+                                isPlaying = true,
+                                currentPos = pos,
+                                track = currentPlayingTrack,
+                                albumArt = currentAlbumArtBitmap
+                            )
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
                 }
             }
         }
@@ -406,7 +502,7 @@ class MusicPlaybackService : Service() {
                         AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
                         AudioManager.AUDIOFOCUS_GAIN -> {
-                            if (PlayerController.playbackState.value.isPlaying) {
+                            if (playWhenReady) {
                                 resumePlayback()
                             }
                         }
@@ -535,10 +631,16 @@ class MusicPlaybackService : Service() {
         val prevIntent = Intent(this, MusicPlaybackService::class.java).apply { action = ACTION_PREV }
         val prevPending = PendingIntent.getService(this, 1, prevIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
+        // Using ACTION_TOGGLE_PLAY_PAUSE guarantees PendingIntent stays valid and handles clicks reliably
         val playPauseIntent = Intent(this, MusicPlaybackService::class.java).apply {
-            action = if (isPlaying) ACTION_PAUSE else ACTION_RESUME
+            action = ACTION_TOGGLE_PLAY_PAUSE
         }
-        val playPausePending = PendingIntent.getService(this, 2, playPauseIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val playPausePending = PendingIntent.getService(
+            this,
+            2,
+            playPauseIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val nextIntent = Intent(this, MusicPlaybackService::class.java).apply { action = ACTION_NEXT }
         val nextPending = PendingIntent.getService(this, 3, nextIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -546,7 +648,11 @@ class MusicPlaybackService : Service() {
         val stopIntent = Intent(this, MusicPlaybackService::class.java).apply { action = ACTION_STOP }
         val stopPending = PendingIntent.getService(this, 4, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L
+        val currentPos = if (isPrepared) {
+            try { mediaPlayer?.currentPosition?.toLong() ?: 0L } catch (e: Exception) { 0L }
+        } else {
+            PlayerController.playbackState.value.currentPositionMs
+        }
         updateMediaSessionState(isPlaying, currentPos, track, currentAlbumArtBitmap)
 
         // Native Android MediaStyle for rich modern media player card with circular buttons & seekbar

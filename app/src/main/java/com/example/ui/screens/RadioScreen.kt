@@ -112,7 +112,7 @@ fun RadioScreen(
                 station = station,
                 isCurrentTrack = isCurrent,
                 isPlaying = playbackState.isPlaying,
-                onPlayClick = { viewModel.playTrack(station, radioStations) },
+                onPlayClick = { viewModel.playOrToggleTrack(station, radioStations) },
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
             )
         }

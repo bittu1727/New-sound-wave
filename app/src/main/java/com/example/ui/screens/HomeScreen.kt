@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
@@ -227,21 +228,22 @@ fun HomeScreen(
                                 )
                             }
 
+                            val isFeaturedPlaying = playbackState.currentTrack?.id == featuredTrack.id && playbackState.isPlaying
                             Button(
-                                onClick = { viewModel.playTrack(featuredTrack, trendingTracks) },
+                                onClick = { viewModel.playOrToggleTrack(featuredTrack, trendingTracks) },
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
                                 modifier = Modifier.testTag("hero_play_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.PlayArrow,
+                                    imageVector = if (isFeaturedPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                     contentDescription = null,
                                     tint = Color.Black,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Play Now",
+                                    text = if (isFeaturedPlaying) "Pause" else "Play Now",
                                     color = Color.Black,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp
@@ -308,7 +310,7 @@ fun HomeScreen(
                             modifier = Modifier
                                 .width(110.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .clickable { viewModel.playTrack(rTrack, recentlyPlayed) }
+                                .clickable { viewModel.playOrToggleTrack(rTrack, recentlyPlayed) }
                                 .testTag("recent_track_${rTrack.id}"),
                             horizontalAlignment = Alignment.Start
                         ) {
@@ -382,7 +384,7 @@ fun HomeScreen(
                 track = track,
                 isCurrentTrack = isCurrent,
                 isPlaying = playbackState.isPlaying,
-                onClick = { viewModel.playTrack(track, trendingTracks) },
+                onClick = { viewModel.playOrToggleTrack(track, trendingTracks) },
                 isFavorite = isFav,
                 onFavoriteToggle = { viewModel.toggleFavorite(track) },
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
@@ -407,7 +409,7 @@ fun HomeScreen(
                 station = station,
                 isCurrentTrack = isCurrent,
                 isPlaying = playbackState.isPlaying,
-                onPlayClick = { viewModel.playTrack(station, radioStations) },
+                onPlayClick = { viewModel.playOrToggleTrack(station, radioStations) },
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
             )
         }

@@ -154,21 +154,19 @@ fun MiniPlayer(
                         }
 
                         // Play/Pause button
-                        if (playbackState.isLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier
-                                    .padding(8.dp)
-                                    .size(32.dp),
-                                color = NeonCyan,
-                                strokeWidth = 2.5.dp
-                            )
-                        } else {
-                            IconButton(
-                                onClick = { PlayerController.togglePlayPause() },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("mini_player_play_pause")
-                            ) {
+                        IconButton(
+                            onClick = { PlayerController.togglePlayPause() },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("mini_player_play_pause")
+                        ) {
+                            if (playbackState.isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    color = NeonCyan,
+                                    strokeWidth = 2.5.dp
+                                )
+                            } else {
                                 Icon(
                                     imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                     contentDescription = if (playbackState.isPlaying) "Pause" else "Play",

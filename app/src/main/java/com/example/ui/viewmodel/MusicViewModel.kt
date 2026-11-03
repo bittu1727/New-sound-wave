@@ -157,6 +157,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         PlayerController.playTrack(track, queue)
     }
 
+    fun playOrToggleTrack(track: Track, queue: List<Track> = listOf(track)) {
+        val current = playbackState.value.currentTrack
+        if (current?.id == track.id) {
+            PlayerController.togglePlayPause()
+        } else {
+            PlayerController.playTrack(track, queue)
+        }
+    }
+
     fun playCustomAudioStream(url: String, title: String) {
         if (url.isBlank()) {
             _toastMessage.value = "Please enter a valid audio URL"
