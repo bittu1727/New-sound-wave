@@ -94,8 +94,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _trendingTracks.value = repository.getInitialTrendingTracks()
         _radioStations.value = repository.getCuratedRadioStations()
 
-        // Preload initial search results for top music
-        performSearch("Top Hits 2024")
+        // Load live full-length trending tracks and preload search
+        viewModelScope.launch {
+            val liveTrending = repository.searchSongs("top trending hits")
+            if (liveTrending.isNotEmpty()) {
+                _trendingTracks.value = liveTrending
+            }
+        }
+        performSearch("Top Hits")
     }
 
     fun setActiveTab(tab: NavTab) {
