@@ -18,6 +18,7 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -53,11 +54,14 @@ class MusicPlaybackService : Service() {
     private var currentPlayingTrack: Track? = null
     private var isPrepared = false
     private var playWhenReady = true
+    private var isPausedDueToTransientLoss = false
+    private var isDucked = false
+    private var hasRetriedFallback = false
     private var currentAlbumArtBitmap: Bitmap? = null
     private var currentArtUrl: String? = null
 
     companion object {
-        const val CHANNEL_ID = "soundwave_media_playback_channel_v2"
+        const val CHANNEL_ID = "soundwave_playback_channel_v3"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_PLAY = "com.example.ACTION_PLAY"
@@ -189,6 +193,8 @@ class MusicPlaybackService : Service() {
         currentPlayingTrack = track
         isPrepared = false
         playWhenReady = true
+        isPausedDueToTransientLoss = false
+        hasRetriedFallback = false
         stopProgressUpdates()
 
         PlayerController.updateState(
@@ -198,8 +204,10 @@ class MusicPlaybackService : Service() {
             durationMs = track.durationMs
         )
 
+        updateMediaMetadata(track, currentAlbumArtBitmap)
+        updateMediaPlaybackState(isPlaying = false, currentPos = 0L)
         showForegroundNotification(track, isPlaying = false)
-        loadAlbumArtworkAsync(track, isPlaying = false)
+        loadAlbumArtworkAsync(track)
 
         releaseMediaPlayer()
         requestAudioFocus()
@@ -208,87 +216,109 @@ class MusicPlaybackService : Service() {
             wakeLock?.acquire(3 * 60 * 60 * 1000L) // 3 hours timeout safety
             wifiLock?.acquire()
 
-            mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                setDataSource(track.streamUrl)
-                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+            val mp = MediaPlayer()
+            mediaPlayer = mp
 
-                setOnPreparedListener { mp ->
-                    isPrepared = true
-                    val duration = if (track.isLiveStream) 0L else mp.duration.toLong()
-                    applyPlaybackSpeed(PlayerController.playbackState.value.speed)
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
+            )
 
-                    if (playWhenReady) {
-                        try {
-                            mp.start()
-                            PlayerController.updateState(
-                                isPlaying = true,
-                                isLoading = false,
-                                currentPosMs = 0L,
-                                durationMs = if (duration > 0) duration else track.durationMs
-                            )
-                            showForegroundNotification(track, isPlaying = true)
-                            startProgressUpdates()
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            PlayerController.updateState(
-                                isPlaying = false,
-                                isLoading = false,
-                                currentPosMs = 0L,
-                                durationMs = 0L,
-                                errorMessage = "Failed to start playback"
-                            )
-                        }
-                    } else {
-                        // User paused while the media was buffering/preparing
+            // Pass standard headers to avoid CDN firewalls / 403 blocks
+            val headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                "Accept" to "*/*"
+            )
+            mp.setDataSource(applicationContext, Uri.parse(track.streamUrl), headers)
+            mp.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+
+            mp.setOnPreparedListener { preparedMp ->
+                isPrepared = true
+                val duration = if (track.isLiveStream) 0L else preparedMp.duration.toLong()
+                applyPlaybackSpeed(PlayerController.playbackState.value.speed)
+
+                if (playWhenReady) {
+                    try {
+                        preparedMp.start()
+                        val finalDuration = if (duration > 0) duration else track.durationMs
+                        PlayerController.updateState(
+                            isPlaying = true,
+                            isLoading = false,
+                            currentPosMs = 0L,
+                            durationMs = finalDuration
+                        )
+                        updateMediaPlaybackState(isPlaying = true, currentPos = 0L)
+                        showForegroundNotification(track, isPlaying = true)
+                        startProgressUpdates()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                         PlayerController.updateState(
                             isPlaying = false,
                             isLoading = false,
                             currentPosMs = 0L,
-                            durationMs = if (duration > 0) duration else track.durationMs
+                            durationMs = track.durationMs,
+                            errorMessage = "Failed to start audio playback"
                         )
-                        showForegroundNotification(track, isPlaying = false)
                     }
-                }
-
-                setOnCompletionListener {
-                    stopProgressUpdates()
-                    PlayerController.updateState(
-                        isPlaying = false,
-                        isLoading = false,
-                        currentPosMs = it.duration.toLong(),
-                        durationMs = it.duration.toLong()
-                    )
-                    PlayerController.onTrackCompletion()
-                }
-
-                setOnErrorListener { _, what, extra ->
-                    stopProgressUpdates()
+                } else {
+                    // Paused while preparing
                     PlayerController.updateState(
                         isPlaying = false,
                         isLoading = false,
                         currentPosMs = 0L,
-                        durationMs = 0L,
-                        errorMessage = "Audio playback error ($what, $extra)"
+                        durationMs = if (duration > 0) duration else track.durationMs
                     )
+                    updateMediaPlaybackState(isPlaying = false, currentPos = 0L)
                     showForegroundNotification(track, isPlaying = false)
-                    true
+                }
+            }
+
+            mp.setOnCompletionListener { completedMp ->
+                stopProgressUpdates()
+                val finalPos = try { completedMp.duration.toLong() } catch (e: Exception) { track.durationMs }
+                PlayerController.updateState(
+                    isPlaying = false,
+                    isLoading = false,
+                    currentPosMs = finalPos,
+                    durationMs = finalPos
+                )
+                updateMediaPlaybackState(isPlaying = false, currentPos = finalPos)
+                PlayerController.onTrackCompletion()
+            }
+
+            mp.setOnErrorListener { _, what, extra ->
+                stopProgressUpdates()
+
+                // Fallback attempt: if 160kbps stream failed, try 96kbps original
+                if (!hasRetriedFallback && track.streamUrl.contains("_160.mp4")) {
+                    hasRetriedFallback = true
+                    val fallbackTrack = track.copy(streamUrl = track.streamUrl.replace("_160.mp4", "_96.mp4"))
+                    startTrackPlayback(fallbackTrack)
+                    return@setOnErrorListener true
                 }
 
-                prepareAsync()
+                PlayerController.updateState(
+                    isPlaying = false,
+                    isLoading = false,
+                    currentPosMs = 0L,
+                    durationMs = track.durationMs,
+                    errorMessage = "Audio playback error ($what, $extra)"
+                )
+                updateMediaPlaybackState(isPlaying = false, currentPos = 0L)
+                showForegroundNotification(track, isPlaying = false)
+                true
             }
+
+            mp.prepareAsync()
         } catch (e: Exception) {
             e.printStackTrace()
             PlayerController.updateState(
                 isPlaying = false,
                 isLoading = false,
                 currentPosMs = 0L,
-                durationMs = 0L,
+                durationMs = track.durationMs,
                 errorMessage = "Failed to load audio stream: ${e.localizedMessage ?: "Unknown error"}"
             )
         }
@@ -296,6 +326,7 @@ class MusicPlaybackService : Service() {
 
     private fun pausePlayback() {
         playWhenReady = false
+        isPausedDueToTransientLoss = false
         if (mediaPlayer != null && isPrepared) {
             try {
                 if (mediaPlayer?.isPlaying == true) {
@@ -325,6 +356,8 @@ class MusicPlaybackService : Service() {
             durationMs = duration
         )
 
+        updateMediaPlaybackState(isPlaying = false, currentPos = currentPos)
+
         currentPlayingTrack?.let {
             showForegroundNotification(it, isPlaying = false)
         }
@@ -332,6 +365,7 @@ class MusicPlaybackService : Service() {
 
     private fun resumePlayback() {
         playWhenReady = true
+        isPausedDueToTransientLoss = false
         val track = currentPlayingTrack ?: PlayerController.playbackState.value.currentTrack
         if (track == null) return
 
@@ -349,6 +383,7 @@ class MusicPlaybackService : Service() {
                 currentPosMs = PlayerController.playbackState.value.currentPositionMs,
                 durationMs = track.durationMs
             )
+            updateMediaPlaybackState(isPlaying = false, currentPos = PlayerController.playbackState.value.currentPositionMs)
             showForegroundNotification(track, isPlaying = false)
             return
         }
@@ -366,6 +401,7 @@ class MusicPlaybackService : Service() {
                     durationMs = duration
                 )
 
+                updateMediaPlaybackState(isPlaying = true, currentPos = currentPos)
                 showForegroundNotification(track, isPlaying = true)
                 startProgressUpdates()
             } catch (e: Exception) {
@@ -387,12 +423,7 @@ class MusicPlaybackService : Service() {
                     currentPosMs = positionMs,
                     durationMs = mediaPlayer?.duration?.toLong() ?: 0L
                 )
-                updateMediaSessionState(
-                    isPlaying = isPlayingNow,
-                    currentPos = positionMs,
-                    track = currentPlayingTrack,
-                    albumArt = currentAlbumArtBitmap
-                )
+                updateMediaPlaybackState(isPlaying = isPlayingNow, currentPos = positionMs)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -413,6 +444,7 @@ class MusicPlaybackService : Service() {
 
     private fun stopPlayback() {
         playWhenReady = false
+        isPausedDueToTransientLoss = false
         stopProgressUpdates()
         releaseMediaPlayer()
         releaseLocks()
@@ -423,6 +455,7 @@ class MusicPlaybackService : Service() {
             currentPosMs = 0L,
             durationMs = 0L
         )
+        updateMediaPlaybackState(isPlaying = false, currentPos = 0L)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -467,12 +500,7 @@ class MusicPlaybackService : Service() {
                                 currentPosMs = pos,
                                 durationMs = dur
                             )
-                            updateMediaSessionState(
-                                isPlaying = true,
-                                currentPos = pos,
-                                track = currentPlayingTrack,
-                                albumArt = currentAlbumArtBitmap
-                            )
+                            updateMediaPlaybackState(isPlaying = true, currentPos = pos)
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -497,16 +525,10 @@ class MusicPlaybackService : Service() {
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                 )
+                .setAcceptsDelayedFocusGain(true)
+                .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener { focusChange ->
-                    when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_GAIN -> {
-                            if (playWhenReady) {
-                                resumePlayback()
-                            }
-                        }
-                    }
+                    handleAudioFocusChange(focusChange)
                 }
                 .build()
             audioFocusRequest = req
@@ -514,12 +536,53 @@ class MusicPlaybackService : Service() {
         } else {
             @Suppress("DEPRECATION")
             am.requestAudioFocus(
-                { focusChange ->
-                    if (focusChange == AudioManager.AUDIOFOCUS_LOSS) pausePlayback()
-                },
+                { focusChange -> handleAudioFocusChange(focusChange) },
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun handleAudioFocusChange(focusChange: Int) {
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                // Permanent focus loss (another music player or video app started)
+                pausePlayback()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                // Temporary loss (phone call, notification alert). Do not reset user intent.
+                if (mediaPlayer?.isPlaying == true) {
+                    isPausedDueToTransientLoss = true
+                    try { mediaPlayer?.pause() } catch (e: Exception) { e.printStackTrace() }
+                    stopProgressUpdates()
+                    PlayerController.updateState(
+                        isPlaying = false,
+                        isLoading = false,
+                        currentPosMs = mediaPlayer?.currentPosition?.toLong() ?: 0L,
+                        durationMs = mediaPlayer?.duration?.toLong() ?: 0L
+                    )
+                    updateMediaPlaybackState(isPlaying = false, currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L)
+                    currentPlayingTrack?.let { showForegroundNotification(it, isPlaying = false) }
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // Navigation prompt, lower volume briefly
+                isDucked = true
+                try { mediaPlayer?.setVolume(0.2f, 0.2f) } catch (e: Exception) { e.printStackTrace() }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                // Regained focus: restore volume or resume
+                if (isDucked) {
+                    isDucked = false
+                    try { mediaPlayer?.setVolume(1.0f, 1.0f) } catch (e: Exception) { e.printStackTrace() }
+                }
+                if (isPausedDueToTransientLoss) {
+                    isPausedDueToTransientLoss = false
+                    if (playWhenReady) {
+                        resumePlayback()
+                    }
+                }
+            }
         }
     }
 
@@ -535,10 +598,11 @@ class MusicPlaybackService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Using IMPORTANCE_LOW ensures media playback notification never beeps, vibrates, or steals focus from itself
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.music_service_channel_name),
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = getString(R.string.music_service_channel_desc)
                 setShowBadge(false)
@@ -551,9 +615,10 @@ class MusicPlaybackService : Service() {
         }
     }
 
-    private fun loadAlbumArtworkAsync(track: Track, isPlaying: Boolean) {
+    private fun loadAlbumArtworkAsync(track: Track) {
         if (track.artworkUrl == currentArtUrl && currentAlbumArtBitmap != null) {
-            showForegroundNotification(track, isPlaying)
+            val isPlayingNow = try { mediaPlayer?.isPlaying == true } catch (e: Exception) { false }
+            showForegroundNotification(track, isPlayingNow)
             return
         }
 
@@ -578,14 +643,34 @@ class MusicPlaybackService : Service() {
                 currentAlbumArtBitmap = bitmap
                 currentArtUrl = track.artworkUrl
                 if (currentPlayingTrack?.id == track.id) {
-                    showForegroundNotification(track, isPlaying)
+                    val isPlayingNow = try { mediaPlayer?.isPlaying == true } catch (e: Exception) { false }
+                    updateMediaMetadata(track, bitmap)
+                    showForegroundNotification(track, isPlayingNow)
                 }
             }
         }
     }
 
-    private fun updateMediaSessionState(isPlaying: Boolean, currentPos: Long, track: Track?, albumArt: Bitmap?) {
+    private fun updateMediaMetadata(track: Track?, albumArt: Bitmap?) {
         val session = mediaSession ?: return
+        if (track == null) return
+
+        val metaBuilder = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, track.artist)
+            .putString(MediaMetadata.METADATA_KEY_ALBUM, track.album.ifEmpty { track.genre })
+            .putLong(MediaMetadata.METADATA_KEY_DURATION, if (track.isLiveStream) -1L else track.durationMs)
+
+        if (albumArt != null) {
+            metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, albumArt)
+            metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, albumArt)
+        }
+        session.setMetadata(metaBuilder.build())
+    }
+
+    private fun updateMediaPlaybackState(isPlaying: Boolean, currentPos: Long) {
+        val session = mediaSession ?: return
+        val speed = if (isPlaying) PlayerController.playbackState.value.speed else 0.0f
         val stateBuilder = PlaybackState.Builder()
             .setActions(
                 PlaybackState.ACTION_PLAY or
@@ -599,22 +684,9 @@ class MusicPlaybackService : Service() {
             .setState(
                 if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
                 currentPos,
-                PlayerController.playbackState.value.speed
+                speed
             )
         session.setPlaybackState(stateBuilder.build())
-
-        if (track != null) {
-            val metaBuilder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, track.artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, track.album.ifEmpty { track.genre })
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, if (track.isLiveStream) -1L else track.durationMs)
-            if (albumArt != null) {
-                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, albumArt)
-                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, albumArt)
-            }
-            session.setMetadata(metaBuilder.build())
-        }
     }
 
     private fun showForegroundNotification(track: Track, isPlaying: Boolean) {
@@ -631,7 +703,6 @@ class MusicPlaybackService : Service() {
         val prevIntent = Intent(this, MusicPlaybackService::class.java).apply { action = ACTION_PREV }
         val prevPending = PendingIntent.getService(this, 1, prevIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        // Using ACTION_TOGGLE_PLAY_PAUSE guarantees PendingIntent stays valid and handles clicks reliably
         val playPauseIntent = Intent(this, MusicPlaybackService::class.java).apply {
             action = ACTION_TOGGLE_PLAY_PAUSE
         }
@@ -653,7 +724,7 @@ class MusicPlaybackService : Service() {
         } else {
             PlayerController.playbackState.value.currentPositionMs
         }
-        updateMediaSessionState(isPlaying, currentPos, track, currentAlbumArtBitmap)
+        updateMediaPlaybackState(isPlaying, currentPos)
 
         // Native Android MediaStyle for rich modern media player card with circular buttons & seekbar
         val mediaStyle = Notification.MediaStyle()
@@ -669,6 +740,7 @@ class MusicPlaybackService : Service() {
             .setSubText(track.album.ifEmpty { track.genre })
             .setContentIntent(openAppPendingIntent)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
             .setOngoing(isPlaying)
             .setColor(0xFF00E5FF.toInt())
             .setColorized(true)

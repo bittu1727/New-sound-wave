@@ -76,8 +76,7 @@ object PlayerController {
         val state = _playbackState.value
         if (state.currentTrack == null) return
 
-        // If currently playing OR currently buffering/loading, pausing is the expected user action
-        if (state.isPlaying || state.isLoading) {
+        if (state.isPlaying) {
             pause()
         } else {
             resume()

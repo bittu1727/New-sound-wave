@@ -160,8 +160,8 @@ class OnlineMusicApi(
             val decodedBytes = Base64.decode(encryptedUrl, Base64.DEFAULT)
             val decryptedBytes = cipher.doFinal(decodedBytes)
             val url = String(decryptedBytes, Charsets.UTF_8)
-            // Upgrade stream to 160kbps for crystal-clear full audio quality
-            url.replace("_96.mp4", "_160.mp4")
+            // Upgrade stream to 160kbps for crystal-clear full audio quality and enforce HTTPS
+            url.replace("_96.mp4", "_160.mp4").replace("http://", "https://")
         } catch (e: Exception) {
             null
         }

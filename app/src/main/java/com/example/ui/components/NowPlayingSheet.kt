@@ -287,6 +287,19 @@ fun NowPlayingSheet(
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center
                 )
+                if (playbackState.errorMessage != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = playbackState.errorMessage,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = VibrantPink,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
 
             // Seek slider
