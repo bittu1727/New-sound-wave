@@ -8,16 +8,23 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaMetadata
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import androidx.core.app.NotificationCompat
+import coil.Coil
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.example.MainActivity
 import com.example.R
 import com.example.model.Track
@@ -28,13 +35,16 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MusicPlaybackService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var progressJob: Job? = null
+    private var artLoadJob: Job? = null
 
     private var mediaPlayer: MediaPlayer? = null
+    private var mediaSession: MediaSession? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -42,9 +52,11 @@ class MusicPlaybackService : Service() {
 
     private var currentPlayingTrack: Track? = null
     private var isPrepared = false
+    private var currentAlbumArtBitmap: Bitmap? = null
+    private var currentArtUrl: String? = null
 
     companion object {
-        const val CHANNEL_ID = "soundwave_playback_channel"
+        const val CHANNEL_ID = "soundwave_media_playback_channel_v2"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_PLAY = "com.example.ACTION_PLAY"
@@ -65,8 +77,40 @@ class MusicPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        setupMediaSession()
         createNotificationChannel()
         acquireLocks()
+    }
+
+    private fun setupMediaSession() {
+        mediaSession = MediaSession(this, "SoundWaveMediaSession").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onPlay() {
+                    resumePlayback()
+                }
+
+                override fun onPause() {
+                    pausePlayback()
+                }
+
+                override fun onSkipToNext() {
+                    PlayerController.playNext()
+                }
+
+                override fun onSkipToPrevious() {
+                    PlayerController.playPrevious()
+                }
+
+                override fun onSeekTo(pos: Long) {
+                    performSeek(pos)
+                }
+
+                override fun onStop() {
+                    stopPlayback()
+                }
+            })
+            isActive = true
+        }
     }
 
     private fun acquireLocks() {
@@ -76,6 +120,7 @@ class MusicPlaybackService : Service() {
             wakeLock?.setReferenceCounted(false)
 
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
             wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SoundWave:WifiLock")
             wifiLock?.setReferenceCounted(false)
         } catch (e: Exception) {
@@ -133,7 +178,8 @@ class MusicPlaybackService : Service() {
             durationMs = track.durationMs
         )
 
-        showForegroundNotification(track, isPlaying = false, isLoading = true)
+        showForegroundNotification(track, isPlaying = false)
+        loadAlbumArtworkAsync(track, isPlaying = false)
 
         releaseMediaPlayer()
         requestAudioFocus()
@@ -164,7 +210,7 @@ class MusicPlaybackService : Service() {
                         currentPosMs = 0L,
                         durationMs = if (duration > 0) duration else track.durationMs
                     )
-                    showForegroundNotification(track, isPlaying = true, isLoading = false)
+                    showForegroundNotification(track, isPlaying = true)
                     startProgressUpdates()
                 }
 
@@ -188,7 +234,7 @@ class MusicPlaybackService : Service() {
                         durationMs = 0L,
                         errorMessage = "Audio playback error ($what, $extra)"
                     )
-                    showForegroundNotification(track, isPlaying = false, isLoading = false)
+                    showForegroundNotification(track, isPlaying = false)
                     true
                 }
 
@@ -222,7 +268,7 @@ class MusicPlaybackService : Service() {
         )
 
         currentPlayingTrack?.let {
-            showForegroundNotification(it, isPlaying = false, isLoading = false)
+            showForegroundNotification(it, isPlaying = false)
         }
     }
 
@@ -240,7 +286,7 @@ class MusicPlaybackService : Service() {
             )
 
             currentPlayingTrack?.let {
-                showForegroundNotification(it, isPlaying = true, isLoading = false)
+                showForegroundNotification(it, isPlaying = true)
             }
             startProgressUpdates()
         }
@@ -254,6 +300,12 @@ class MusicPlaybackService : Service() {
                 isLoading = false,
                 currentPosMs = positionMs,
                 durationMs = mediaPlayer?.duration?.toLong() ?: 0L
+            )
+            updateMediaSessionState(
+                isPlaying = mediaPlayer?.isPlaying == true,
+                currentPos = positionMs,
+                track = currentPlayingTrack,
+                albumArt = currentAlbumArtBitmap
             )
         }
     }
@@ -313,7 +365,7 @@ class MusicPlaybackService : Service() {
         progressJob?.cancel()
         progressJob = serviceScope.launch {
             while (isActive) {
-                delay(500L)
+                delay(1000L)
                 if (mediaPlayer?.isPlaying == true) {
                     val pos = mediaPlayer?.currentPosition?.toLong() ?: 0L
                     val dur = if (currentPlayingTrack?.isLiveStream == true) 0L else mediaPlayer?.duration?.toLong() ?: 0L
@@ -322,6 +374,12 @@ class MusicPlaybackService : Service() {
                         isLoading = false,
                         currentPosMs = pos,
                         durationMs = dur
+                    )
+                    updateMediaSessionState(
+                        isPlaying = true,
+                        currentPos = pos,
+                        track = currentPlayingTrack,
+                        albumArt = currentAlbumArtBitmap
                     )
                 }
             }
@@ -384,18 +442,86 @@ class MusicPlaybackService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.music_service_channel_name),
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = getString(R.string.music_service_channel_desc)
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(null, null)
+                enableVibration(false)
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
     }
 
-    private fun showForegroundNotification(track: Track, isPlaying: Boolean, isLoading: Boolean) {
+    private fun loadAlbumArtworkAsync(track: Track, isPlaying: Boolean) {
+        if (track.artworkUrl == currentArtUrl && currentAlbumArtBitmap != null) {
+            showForegroundNotification(track, isPlaying)
+            return
+        }
+
+        artLoadJob?.cancel()
+        artLoadJob = serviceScope.launch(Dispatchers.IO) {
+            val bitmap = try {
+                if (track.artworkUrl.isNotEmpty()) {
+                    val imageLoader = Coil.imageLoader(applicationContext)
+                    val request = ImageRequest.Builder(applicationContext)
+                        .data(track.artworkUrl)
+                        .allowHardware(false) // Must be a software bitmap for notifications
+                        .size(512, 512)
+                        .build()
+                    val result = (imageLoader.execute(request) as? SuccessResult)?.drawable
+                    (result as? BitmapDrawable)?.bitmap
+                } else null
+            } catch (e: Exception) {
+                null
+            }
+
+            withContext(Dispatchers.Main) {
+                currentAlbumArtBitmap = bitmap
+                currentArtUrl = track.artworkUrl
+                if (currentPlayingTrack?.id == track.id) {
+                    showForegroundNotification(track, isPlaying)
+                }
+            }
+        }
+    }
+
+    private fun updateMediaSessionState(isPlaying: Boolean, currentPos: Long, track: Track?, albumArt: Bitmap?) {
+        val session = mediaSession ?: return
+        val stateBuilder = PlaybackState.Builder()
+            .setActions(
+                PlaybackState.ACTION_PLAY or
+                PlaybackState.ACTION_PAUSE or
+                PlaybackState.ACTION_PLAY_PAUSE or
+                PlaybackState.ACTION_SKIP_TO_NEXT or
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackState.ACTION_SEEK_TO or
+                PlaybackState.ACTION_STOP
+            )
+            .setState(
+                if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                currentPos,
+                PlayerController.playbackState.value.speed
+            )
+        session.setPlaybackState(stateBuilder.build())
+
+        if (track != null) {
+            val metaBuilder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, track.artist)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, track.album.ifEmpty { track.genre })
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, if (track.isLiveStream) -1L else track.durationMs)
+            if (albumArt != null) {
+                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, albumArt)
+                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, albumArt)
+            }
+            session.setMetadata(metaBuilder.build())
+        }
+    }
+
+    private fun showForegroundNotification(track: Track, isPlaying: Boolean) {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -420,23 +546,64 @@ class MusicPlaybackService : Service() {
         val stopIntent = Intent(this, MusicPlaybackService::class.java).apply { action = ACTION_STOP }
         val stopPending = PendingIntent.getService(this, 4, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-        val playPauseTitle = if (isPlaying) getString(R.string.pause) else getString(R.string.play)
+        val currentPos = mediaPlayer?.currentPosition?.toLong() ?: 0L
+        updateMediaSessionState(isPlaying, currentPos, track, currentAlbumArtBitmap)
 
-        val contentStatus = if (isLoading) "Buffering…" else if (track.isLiveStream) "Live Stream" else track.artist
+        // Native Android MediaStyle for rich modern media player card with circular buttons & seekbar
+        val mediaStyle = Notification.MediaStyle()
+        mediaSession?.sessionToken?.let { mediaStyle.setMediaSession(it) }
+        // Compact view shows Prev (0), Play/Pause (1), Next (2)
+        mediaStyle.setShowActionsInCompactView(0, 1, 2)
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_media_play)
+        val builder = Notification.Builder(this, CHANNEL_ID)
+            .setStyle(mediaStyle)
+            .setSmallIcon(R.drawable.ic_notif_music)
             .setContentTitle(track.title)
-            .setContentText(contentStatus)
-            .setSubText(track.genre)
+            .setContentText(track.artist)
+            .setSubText(track.album.ifEmpty { track.genre })
             .setContentIntent(openAppPendingIntent)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(isPlaying)
-            .addAction(android.R.drawable.ic_media_previous, getString(R.string.previous), prevPending)
-            .addAction(playPauseIcon, playPauseTitle, playPausePending)
-            .addAction(android.R.drawable.ic_media_next, getString(R.string.next), nextPending)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Close", stopPending)
+            .setColor(0xFF00E5FF.toInt())
+            .setColorized(true)
+
+        currentAlbumArtBitmap?.let {
+            builder.setLargeIcon(it)
+        }
+
+        // Action 0: Previous
+        val prevAction = Notification.Action.Builder(
+            R.drawable.ic_notif_prev,
+            getString(R.string.previous),
+            prevPending
+        ).build()
+        builder.addAction(prevAction)
+
+        // Action 1: Play / Pause
+        val playPauseIcon = if (isPlaying) R.drawable.ic_notif_pause else R.drawable.ic_notif_play
+        val playPauseTitle = if (isPlaying) getString(R.string.pause) else getString(R.string.play)
+        val playPauseAction = Notification.Action.Builder(
+            playPauseIcon,
+            playPauseTitle,
+            playPausePending
+        ).build()
+        builder.addAction(playPauseAction)
+
+        // Action 2: Next
+        val nextAction = Notification.Action.Builder(
+            R.drawable.ic_notif_next,
+            getString(R.string.next),
+            nextPending
+        ).build()
+        builder.addAction(nextAction)
+
+        // Action 3: Close / Dismiss
+        val closeAction = Notification.Action.Builder(
+            R.drawable.ic_notif_close,
+            "Close",
+            stopPending
+        ).build()
+        builder.addAction(closeAction)
 
         val notification = builder.build()
 
@@ -451,6 +618,12 @@ class MusicPlaybackService : Service() {
 
     override fun onDestroy() {
         stopPlayback()
+        artLoadJob?.cancel()
+        mediaSession?.apply {
+            isActive = false
+            release()
+        }
+        mediaSession = null
         super.onDestroy()
     }
 }
